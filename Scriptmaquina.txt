@@ -1,0 +1,194 @@
+# Script: Eduardo Restrepo
+# Requiere PowerShell con permisos de administrador
+
+
+# Define ruta del reporte
+$fecha = Get-Date -Format "yyyyMMdd_HHmmss"
+$reporte = "$env:USERPROFILE\Desktop\reporte_diagnostico_$fecha.txt"
+New-Item -Path $reporte -ItemType File -Force | Out-Null
+
+function Escribir-Titulo {
+    param([string]$titulo)
+    "`n===============================" | Out-File -FilePath $reporte -Append
+    ">>> $titulo" | Out-File -FilePath $reporte -Append
+    "===============================" | Out-File -FilePath $reporte -Append
+}
+
+# 1. Estado del sistema
+Escribir-Titulo "1. Estado general del sistema"
+systeminfo | Out-File -FilePath $reporte -Append
+
+# 2. Uso de recursos físicos (CPU y Disco)
+Escribir-Titulo "2. Uso de recursos físicos"
+Get-WmiObject Win32_Processor | Select-Object Name, LoadPercentage | Out-File -FilePath $reporte -Append
+Get-WmiObject Win32_LogicalDisk -Filter "DriveType=3" | Select-Object DeviceID, MediaType, Size, FreeSpace | Out-File -FilePath $reporte -Append
+
+# 3. Uso de memoria y telemetría
+Escribir-Titulo "3. Uso de memoria y telemetría"
+Get-CimInstance Win32_OperatingSystem | Select-Object TotalVisibleMemorySize, FreePhysicalMemory | Out-File -FilePath $reporte -Append
+
+# Telemetría habilitada
+"Telemetría habilitada (nivel):" | Out-File -FilePath $reporte -Append
+try {
+    Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection" -Name AllowTelemetry |
+        Select-Object AllowTelemetry | Out-File -FilePath $reporte -Append
+} catch {
+    "No se encontró configuración de telemetría." | Out-File -FilePath $reporte -Append
+}
+
+# 4. Fallos reportados
+Escribir-Titulo "4. Fallos reportados en el visor de eventos (últimos 7 días)"
+Get-WinEvent -FilterHashtable @{LogName='System'; Level=1; StartTime=(Get-Date).AddDays(-7)} -MaxEvents 10 |
+    Format-List TimeCreated, Id, LevelDisplayName, Message | Out-File -FilePath $reporte -Append
+
+# 5. Lista de software instalado
+Escribir-Titulo "5. Lista de software instalado"
+Get-ItemProperty HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\* |
+    Select-Object DisplayName, DisplayVersion, Publisher | Sort-Object DisplayName |
+    Format-Table -AutoSize | Out-File -FilePath $reporte -Append
+
+# 6. Evaluación de rendimiento
+Escribir-Titulo "6. Evaluación de performance general"
+Get-ComputerInfo | Select-Object CsName, WindowsProductName, OsArchitecture, OsBuildNumber, CsTotalPhysicalMemory |
+    Out-File -FilePath $reporte -Append
+
+"Índice de evaluación del rendimiento (si existe):" | Out-File -FilePath $reporte -Append
+try {
+    Get-CimInstance -Class Win32_WinSAT | Out-File -FilePath $reporte -Append
+} catch {
+    "No se encontró evaluación WinSAT (no disponible en algunas ediciones de Windows 11)." | Out-File -FilePath $reporte -Append
+}
+
+# 7. Windows Defender
+Escribir-Titulo "7. Estado y rendimiento de Windows Defender"
+if (Get-Service -Name WinDefend -ErrorAction SilentlyContinue) {
+    Get-MpComputerStatus | Select-Object AMServiceEnabled, AntivirusEnabled, AntivirusSignatureLastUpdated, RealTimeProtectionEnabled |
+        Out-File -FilePath $reporte -Append
+    "Amenazas detectadas recientemente:" | Out-File -FilePath $reporte -Append
+    Get-MpThreatDetection | Select-Object ThreatName, ActionSuccess, InitialDetectionTime |
+        Out-File -FilePath $reporte -Append
+} else {
+    "Windows Defender no está instalado o está desactivado." | Out-File -FilePath $reporte -Append
+}
+
+# 8. Bloatware WINDOWS activo (apps preinstaladas típicas)
+Escribir-Titulo "8. Bloatware windows	activo detectado"
+$bloatware = @(
+    "Candy Crush", "Xbox", "Spotify", "TikTok", "McAfee", "Norton", "Disney", "Instagram", "Facebook"
+)
+Get-AppxPackage | Where-Object { $bloatware -contains $_.Name } |
+    Select-Object Name, PackageFullName | Out-File -FilePath $reporte -Append
+
+
+
+# 9. Bloatware activo (apps preinstaladas típicas)
+Escribir-Titulo "9. Bloatware activo detectado de HP"
+
+Get-ItemProperty HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\* |
+    Where-Object { $_.Publisher -like "*HP*" } |
+    Select-Object DisplayName, DisplayVersion, Publisher | Out-File -FilePath $reporte -Append
+
+# 10. Bloatware activo (apps preinstaladas típicas)
+Escribir-Titulo "10. Cosumo de memoria ram "
+
+# Obtener la memoria total disponible en el sistema (en MB)
+$memTotal = (Get-CimInstance -ClassName Win32_ComputerSystem).TotalPhysicalMemory / 1MB
+
+# Obtener los procesos con su uso de memoria
+$procesos = Get-Process | Select-Object Name, Id, @{Name="MemoriaMB";Expression={[math]::Round($_.WorkingSet64 / 1MB, 2)}}
+
+# Calcular el porcentaje de uso de memoria por proceso
+$procesos = $procesos | Select-Object Name, Id, MemoriaMB, @{Name="PorcentajeRAM";Expression={[math]::Round(($_.MemoriaMB / $memTotal) * 100, 2)}}
+
+# Ordenar por uso de memoria descendente
+$procesos = $procesos | Sort-Object -Property MemoriaMB -Descending
+
+# Mostrar en pantalla (opcional)
+$procesos | Format-Table -AutoSize | Out-File -FilePath $reporte -Append
+
+
+Write-Host "Reporte guardado en: $archivoSalida"
+
+
+
+# 11. Usuarios admin locales 
+Escribir-Titulo "11. Usuarios locales "
+
+# Obtener usuarios que han iniciado sesión actualmente
+$usuariosLogueados = quser | ForEach-Object {
+    ($_ -replace '\s{2,}', ',') -split ',' | Select-Object -First 1
+} | Sort-Object -Unique
+
+Write-Host "`nUsuarios actualmente conectados:`n" -ForegroundColor Cyan | Out-File -FilePath $reporte -Append
+$usuariosLogueados | ForEach-Object { Write-Host "- $_" | Out-File -FilePath $reporte -Append}
+
+# Obtener miembros del grupo de administradores locales
+$adminGroup = [ADSI]"WinNT://$env:COMPUTERNAME/Administrators,group"
+$adminMembers = @()
+$adminGroup.Members() | ForEach-Object {
+    $member = $_.GetType().InvokeMember("Name", 'GetProperty', $null, $_, $null)
+    $adminMembers += $member 
+}
+
+Write-Host "`nUsuarios con privilegios de administrador local:`n" -ForegroundColor Yellow | Out-File -FilePath $reporte -Append
+$adminMembers | ForEach-Object { Write-Host "- $_" | Out-File -FilePath $reporte -Append}
+
+# Comprobación cruzada: ¿cuáles de los usuarios logueados son administradores?
+Write-Host "`nUsuarios conectados con privilegios de administrador:`n" -ForegroundColor Green | Out-File -FilePath $reporte -Append
+$usuariosLogueados | ForEach-Object {
+    if ($adminMembers -contains $_) {
+        Write-Host "- $_" | Out-File -FilePath $reporte -Append
+    }
+}
+
+
+# 12.  Salud del disco duro 
+Escribir-Titulo "12. Salud del disco duro. "
+ Get-PhysicalDisk | Select FriendlyName, HealthStatus | Out-File -FilePath $reporte -Append
+  
+
+# 13. Tiempo desde el último reinicio
+Escribir-Titulo "13. Tiempo desde el último reinicio"
+(Get-CimInstance Win32_OperatingSystem).LastBootUpTime | Out-File -FilePath $reporte -Append
+
+# 14. Programas que se inician con Windows
+Escribir-Titulo "14. Programas que se inician con Windows"
+Get-CimInstance Win32_StartupCommand | Select-Object Name, Command, Location | Out-File -FilePath $reporte -Append
+
+# 15. Servicios innecesarios o en estado sospechoso
+Escribir-Titulo "15. Servicios que no están corriendo o están detenidos"
+Get-Service | Where-Object { $_.Status -ne 'Running' } | Select-Object Name, Status, StartType | Out-File -FilePath $reporte -Append
+
+# 16. Estado de drivers y dispositivos problemáticos
+Escribir-Titulo "16. Dispositivos con errores en el administrador de dispositivos"
+Get-WmiObject Win32_PnPEntity | Where-Object { $_.ConfigManagerErrorCode -ne 0 } | 
+    Select-Object Name, Status, ConfigManagerErrorCode | Out-File -FilePath $reporte -Append
+
+# 17. Estado de red básica
+Escribir-Titulo "17. Estado de red (latencia y pérdida de paquetes)"
+Test-Connection google.com -Count 4 | Out-File -FilePath $reporte -Append
+
+# 18. Configuración DNS y puerta de enlace
+Escribir-Titulo "18. Configuración IP y DNS"
+Get-DnsClientServerAddress | Out-File -FilePath $reporte -Append
+Get-NetIPConfiguration | Out-File -FilePath $reporte -Append
+
+# 19. Archivo de paginación
+Escribir-Titulo "19. Configuración del archivo de paginación"
+Get-CimInstance Win32_PageFileUsage | Select Name, CurrentUsage, PeakUsage | Out-File -FilePath $reporte -Append
+
+# 20. Procesos en espera (indicador de cuello de botella)
+Escribir-Titulo "20. Procesos en espera por recursos (mayor que 1 segundo)"
+Get-Process | Where-Object { $_.WaitTime -gt 1000 } | Select Name, Id, WaitTime | Out-File -FilePath $reporte -Append
+
+# 21. (Opcional) Temperatura del CPU y salud de sensores (si soporte)
+Escribir-Titulo "21. Sensor de temperatura (si soportado por WMI/MSAcpi_ThermalZone)"
+try {
+    Get-WmiObject MSAcpi_ThermalZoneTemperature -Namespace "root/wmi" | 
+        Select-Object InstanceName, @{Name="TempC";Expression={($_.CurrentTemperature - 2732) / 10}} | 
+        Out-File -FilePath $reporte -Append
+} catch {
+    "Sensor de temperatura no disponible." | Out-File -FilePath $reporte -Append
+}
+
+Write-Host "`n✅ Reporte de diagnóstico completado. Guardado en:`n$reporte`n" -ForegroundColor Green
